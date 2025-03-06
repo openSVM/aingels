@@ -6,8 +6,8 @@ export interface BrowserSettings {
 	}
 	// Browser mode settings
 	headless: boolean
-	// Chrome installation to use
-	// chromeType: "chromium" | "system"
+	// Headless browser type
+	headlessBrowserType: "puppeteer" | "lightpanda"
 }
 
 export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = {
@@ -16,7 +16,7 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = {
 		height: 600,
 	},
 	headless: true,
-	// chromeType: "chromium",
+	headlessBrowserType: "puppeteer",
 }
 
 export const BROWSER_VIEWPORT_PRESETS = {
@@ -24,4 +24,9 @@ export const BROWSER_VIEWPORT_PRESETS = {
 	"Small Desktop (900x600)": { width: 900, height: 600 },
 	"Tablet (768x1024)": { width: 768, height: 1024 },
 	"Mobile (360x640)": { width: 360, height: 640 },
+} as const
+
+export const HEADLESS_BROWSER_TYPES = {
+	"Puppeteer": "puppeteer",
+	"LightPanda": "lightpanda",
 } as const

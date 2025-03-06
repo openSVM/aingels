@@ -1,15 +1,20 @@
 import * as vscode from "vscode"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { Browser, Page, ScreenshotOptions, TimeoutError, launch } from "puppeteer-core"
+import { Browser as PuppeteerBrowser, Page as PuppeteerPage, ScreenshotOptions, TimeoutError, launch } from "puppeteer-core"
 // @ts-ignore
 import PCR from "puppeteer-chromium-resolver"
+import * as lightpanda from "@lightpanda-io/browser"
 import pWaitFor from "p-wait-for"
 import delay from "delay"
 import { fileExistsAtPath } from "../../utils/fs"
 import { BrowserActionResult } from "../../shared/ExtensionMessage"
 import { BrowserSettings } from "../../shared/BrowserSettings"
 // import * as chromeLauncher from "chrome-launcher"
+
+// Define types that can work with both browser implementations
+type Browser = PuppeteerBrowser | lightpanda.Browser;
+type Page = PuppeteerPage | lightpanda.Page;
 
 interface PCRStats {
 	puppeteer: { launch: typeof launch }
@@ -104,7 +109,7 @@ export class BrowserSession {
 	// }
 
 	// /**
-	//  * Helper to detect user’s default Chrome data dir.
+	//  * Helper to detect user's default Chrome data dir.
 	//  * Adjust for OS if needed.
 	//  */
 	// private getDefaultChromeUserDataDir(): string {
@@ -126,36 +131,34 @@ export class BrowserSession {
 			await this.closeBrowser() // this may happen when the model launches a browser again after having used it already before
 		}
 
-		const stats = await this.ensureChromiumExists()
-		this.browser = await stats.puppeteer.launch({
-			args: [
-				"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-			],
-			executablePath: stats.executablePath,
-			defaultViewport: this.browserSettings.viewport,
-			headless: this.browserSettings.headless,
-		})
+		// Get the headless browser type from settings or use the one from browserSettings
+		const headlessBrowserType = vscode.workspace.getConfiguration("cline").get<string>("headlessBrowserType") || this.browserSettings.headlessBrowserType;
 
-		// if (this.browserSettings.chromeType === "system") {
-		// 	const userDataDir = this.getDefaultChromeUserDataDir()
-		// 	this.browser = await stats.puppeteer.launch({
-		// 		args: [`--user-data-dir=${userDataDir}`, "--profile-directory=Default"],
-		// 		executablePath: await this.getSystemChromeExecutablePath(),
-		// 		defaultViewport: this.browserSettings.viewport,
-		// 		headless: this.browserSettings.headless,
-		// 	})
-		// } else {
-		// 	this.browser = await stats.puppeteer.launch({
-		// 		args: [
-		// 			"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-		// 		],
-		// 		executablePath: stats.executablePath,
-		// 		defaultViewport: this.browserSettings.viewport,
-		// 		headless: this.browserSettings.headless,
-		// 	})
-		// }
+		if (headlessBrowserType === "lightpanda") {
+			// Launch LightPanda browser
+			console.log("Launching LightPanda browser")
+			this.browser = await lightpanda.launch({
+				headless: this.browserSettings.headless,
+				viewport: {
+					width: this.browserSettings.viewport.width,
+					height: this.browserSettings.viewport.height
+				}
+			});
+		} else {
+			// Default to Puppeteer
+			console.log("Launching Puppeteer browser")
+			const stats = await this.ensureChromiumExists()
+			this.browser = await stats.puppeteer.launch({
+				args: [
+					"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+				],
+				executablePath: stats.executablePath,
+				defaultViewport: this.browserSettings.viewport,
+				headless: this.browserSettings.headless,
+			})
+		}
 
-		// (latest version of puppeteer does not add headless to user agent)
+		// Create a new page
 		this.page = await this.browser?.newPage()
 	}
 
@@ -180,6 +183,9 @@ export class BrowserSession {
 		const logs: string[] = []
 		let lastLogTs = Date.now()
 
+		// Get the headless browser type from settings or use the one from browserSettings
+		const headlessBrowserType = vscode.workspace.getConfiguration("cline").get<string>("headlessBrowserType") || this.browserSettings.headlessBrowserType;
+
 		const consoleListener = (msg: any) => {
 			if (msg.type() === "log") {
 				logs.push(msg.text())
@@ -194,9 +200,11 @@ export class BrowserSession {
 			lastLogTs = Date.now()
 		}
 
-		// Add the listeners
-		this.page.on("console", consoleListener)
-		this.page.on("pageerror", errorListener)
+		// Add the listeners - only for Puppeteer
+		if (headlessBrowserType !== "lightpanda") {
+			(this.page as PuppeteerPage).on("console", consoleListener)
+			(this.page as PuppeteerPage).on("pageerror", errorListener)
+		}
 
 		try {
 			await action(this.page)
@@ -206,35 +214,48 @@ export class BrowserSession {
 			}
 		}
 
-		// Wait for console inactivity, with a timeout
-		await pWaitFor(() => Date.now() - lastLogTs >= 500, {
-			timeout: 3_000,
-			interval: 100,
-		}).catch(() => {})
+		// Wait for console inactivity, with a timeout - only for Puppeteer
+		if (headlessBrowserType !== "lightpanda") {
+			await pWaitFor(() => Date.now() - lastLogTs >= 500, {
+				timeout: 3_000,
+				interval: 100,
+			}).catch(() => {})
+		}
 
 		let options: ScreenshotOptions = {
 			encoding: "base64",
-
-			// clip: {
-			// 	x: 0,
-			// 	y: 0,
-			// 	width: 900,
-			// 	height: 600,
-			// },
 		}
 
-		let screenshotBase64 = await this.page.screenshot({
-			...options,
-			type: "webp",
-		})
+		let screenshotBase64: string | Buffer;
+		
+		// Take screenshot based on browser type
+		if (headlessBrowserType === "lightpanda") {
+			screenshotBase64 = await this.page.screenshot({
+				type: "webp"
+			});
+		} else {
+			screenshotBase64 = await (this.page as PuppeteerPage).screenshot({
+				...options,
+				type: "webp",
+			});
+		}
+		
 		let screenshot = `data:image/webp;base64,${screenshotBase64}`
 
 		if (!screenshotBase64) {
 			console.log("webp screenshot failed, trying png")
-			screenshotBase64 = await this.page.screenshot({
-				...options,
-				type: "png",
-			})
+			
+			if (headlessBrowserType === "lightpanda") {
+				screenshotBase64 = await this.page.screenshot({
+					type: "png"
+				});
+			} else {
+				screenshotBase64 = await (this.page as PuppeteerPage).screenshot({
+					...options,
+					type: "png",
+				});
+			}
+			
 			screenshot = `data:image/png;base64,${screenshotBase64}`
 		}
 
@@ -242,9 +263,11 @@ export class BrowserSession {
 			throw new Error("Failed to take screenshot.")
 		}
 
-		// this.page.removeAllListeners() <- causes the page to crash!
-		this.page.off("console", consoleListener)
-		this.page.off("pageerror", errorListener)
+		// Remove listeners - only for Puppeteer
+		if (headlessBrowserType !== "lightpanda") {
+			(this.page as PuppeteerPage).off("console", consoleListener)
+			(this.page as PuppeteerPage).off("pageerror", errorListener)
+		}
 
 		return {
 			screenshot,
@@ -302,12 +325,19 @@ export class BrowserSession {
 	async click(coordinate: string): Promise<BrowserActionResult> {
 		const [x, y] = coordinate.split(",").map(Number)
 		return this.doAction(async (page) => {
-			// Set up network request monitoring
-			let hasNetworkActivity = false
-			const requestListener = () => {
-				hasNetworkActivity = true
+			// Get the headless browser type from settings or use the one from browserSettings
+			const headlessBrowserType = vscode.workspace.getConfiguration("cline").get<string>("headlessBrowserType") || this.browserSettings.headlessBrowserType;
+			
+			// Set up network request monitoring - only for Puppeteer
+			let hasNetworkActivity = false;
+			let requestListener: any;
+			
+			if (headlessBrowserType !== "lightpanda") {
+				requestListener = () => {
+					hasNetworkActivity = true;
+				};
+				(page as PuppeteerPage).on("request", requestListener);
 			}
-			page.on("request", requestListener)
 
 			// Perform the click
 			await page.mouse.click(x, y)
@@ -316,19 +346,25 @@ export class BrowserSession {
 			// Small delay to check if click triggered any network activity
 			await delay(100)
 
-			if (hasNetworkActivity) {
+			if (headlessBrowserType !== "lightpanda" && hasNetworkActivity) {
 				// If we detected network activity, wait for navigation/loading
-				await page
+				await (page as PuppeteerPage)
 					.waitForNavigation({
 						waitUntil: ["domcontentloaded", "networkidle2"],
 						timeout: 7000,
 					})
 					.catch(() => {})
 				await this.waitTillHTMLStable(page)
+			} else if (headlessBrowserType === "lightpanda") {
+				// For LightPanda, always wait a bit after clicking
+				await delay(1000)
+				await this.waitTillHTMLStable(page)
 			}
 
-			// Clean up listener
-			page.off("request", requestListener)
+			// Clean up listener - only for Puppeteer
+			if (headlessBrowserType !== "lightpanda" && requestListener) {
+				(page as PuppeteerPage).off("request", requestListener)
+			}
 		})
 	}
 
